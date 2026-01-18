@@ -113,3 +113,9 @@ celerybeat.pid
 *.orig
 *.tmp
 *~
+
+# Logs and temporary documentation
+logs/
+IMPLEMENTATION_COMPLETE.txt
+QUICK_REFERENCE.md
+QUOTA_FALLBACK_GUIDE.txt
