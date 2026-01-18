@@ -1,0 +1,147 @@
+# AI Orchestrator Configuration File
+# This file contains default settings for providers, workflows, and system behavior
+
+# Provider Settings
+# Note: Quota errors (429, rate limits) trigger automatic fallback to next provider
+# Retryable errors (timeouts, network) use exponential backoff before fallback
+providers:
+  ollama:
+    enabled: true
+    model: "qwen3-coder:480b-cloud"
+    timeout: 900 # 15 minutes for long-running operations
+    retry_attempts: 3 # Number of retries for transient errors
+    retry_delay: 4 # Base delay in seconds (doubles each retry)
+
+  ollama_fallback:
+    enabled: true
+    model: "qwen3-coder:30b" # Fallback local model, used only when all other providers fail
+    timeout: 900 # 15 minutes for long-running operations
+    retry_attempts: 3
+    retry_delay: 4
+
+  claude:
+    enabled: true
+    timeout: 900 # 15 minutes for long-running operations
+    retry_attempts: 3
+    retry_delay: 4 # Base delay in seconds (doubles each retry)
+
+  gemini:
+    enabled: true
+    timeout: 900 # 15 minutes for long-running operations
+    retry_attempts: 3 # Quota errors skip retries and fallback immediately
+    retry_delay: 4 # Base delay in seconds (doubles each retry)
+    yolo_mode: true
+
+# Workflow Settings
+workflow:
+  default_mode: "workflow"
+  enable_checkpoints: true
+  checkpoint_dir: "./checkpoints"
+  auto_resume: true
+
+  # Role assignment priorities with automatic fallback
+  # If a provider fails (quota exhausted, error, unavailable), workflow automatically
+  # tries the next provider in the priority list for that role
+  # ollama_fallback (qwen3-coder:30b) is the last resort, used only when everything else fails
+  role_priorities:
+    planner: ["claude", "gemini", "ollama", "ollama_fallback"] # Last resort: local qwen3-coder:30b
+    coder: ["gemini", "claude", "ollama", "ollama_fallback"] # Last resort: local qwen3-coder:30b
+    tester: ["gemini", "claude", "ollama", "ollama_fallback"] # Last resort: local qwen3-coder:30b
+    reviewer: ["claude", "ollama", "gemini", "ollama_fallback"] # Last resort: local qwen3-coder:30b
+    documenter: ["ollama", "gemini", "claude", "ollama_fallback"] # Last resort: local qwen3-coder:30b
+
+  # Workflow step configuration
+  steps:
+    planning:
+      enabled: true
+      save_output: true
+      critical: true
+
+    coding:
+      enabled: true
+      save_output: true
+      critical: true
+
+    testing:
+      enabled: true
+      save_output: true
+      critical: false # Non-blocking if fails
+
+    reviewing:
+      enabled: true
+      save_output: true
+      critical: true
+
+    refining:
+      enabled: true
+      save_output: true
+      critical: false
+      skip_on_lgtm: true
+      lgtm_max_length: 200
+
+    documenting:
+      enabled: true
+      save_output: true
+      critical: false
+
+# Logging Configuration
+logging:
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s [%(levelname)s] %(message)s"
+  date_format: "%H:%M:%S"
+  file_logging: false
+  log_directory: "./logs"
+  log_file: "ai_orchestrator.log"
+
+# Output Settings
+output:
+  default_directory: "./output"
+  create_subdirs: true
+  timestamp_dirs: true
+  preserve_logs: true
+
+# Performance Settings
+performance:
+  max_parallel_providers: 3
+  rate_limit_requests: true
+  requests_per_minute: 60
+  enable_caching: true
+  cache_directory: "./.cache"
+
+# Panel Mode Settings
+panel:
+  default_curator: "claude"
+  min_workers: 2
+  aggregate_drafts: true
+
+# Smart Mode Settings
+smart:
+  primary_provider: "ollama"
+  verification_provider: "claude"
+  require_both: true
+
+# Error Handling
+error_handling:
+  retry_on_timeout: true
+  retry_on_error: true
+  max_retries: 3
+  backoff_multiplier: 2
+  fallback_to_available: true
+
+# Validation
+validation:
+  min_prompt_length: 10
+  max_prompt_length: 4000
+  check_null_bytes: true
+
+# Advanced Features
+features:
+  enable_model_switching: true
+  enable_backup_model: true
+  enable_telemetry: false
+  enable_analytics: false
+
+# Environment Variables (can override these settings)
+# OLLAMA_MODEL - Override ollama model
+# AI_ORCHESTRATOR_TIMEOUT - Override default timeout
+# AI_ORCHESTRATOR_MODE - Override default mode
