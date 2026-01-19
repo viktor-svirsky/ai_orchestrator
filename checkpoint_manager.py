@@ -6,12 +6,19 @@ Provides checkpoint/resume functionality for long-running workflows.
 Allows continuation from any step if a failure or interruption occurs.
 """
 
+import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from security_validation import (
+    CheckpointValidationError,
+    validate_checkpoint_schema,
+    validate_output_path,
+)
 
 
 @dataclass
@@ -40,7 +47,17 @@ class CheckpointManager:
         """
         self.workflow_id = workflow_id
         self.output_dir = output_dir or Path.cwd() / "checkpoints"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Validate output directory path
+        try:
+            self.output_dir = validate_output_path(
+                self.output_dir, Path.cwd(), allow_creation=True
+            )
+        except Exception as e:
+            logging.warning(f"Path validation failed, using default: {e}")
+            self.output_dir = Path.cwd() / "checkpoints"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
         self.checkpoint_file = self.output_dir / f"checkpoint_{workflow_id}.json"
         self.checkpoints: List[CheckpointData] = []
         self.load_checkpoints()
@@ -289,8 +306,6 @@ def create_workflow_checkpoint_manager(
         Configured CheckpointManager instance
     """
     # Generate a simple workflow ID from prompt hash and timestamp
-    import hashlib
-
     prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     workflow_id = f"{mode}_{prompt_hash}_{timestamp}"

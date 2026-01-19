@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import sys
 import time
@@ -18,6 +17,15 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from security_validation import (
+    InvalidInputError,
+    safe_decode,
+    sanitize_ai_response,
+    sanitize_log_message,
+    validate_output_path,
+    validate_prompt,
+)
 
 # --- Configuration & Constants ---
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder:480b-cloud")
@@ -95,9 +103,10 @@ class AIProvider(ABC):
 
     def _validate_prompt(self, prompt: str):
         """Basic input validation to prevent issues."""
-        if "\0" in prompt:
-            raise ValueError("Prompt contains null bytes.")
-        # We could add max length checks here if needed, but for now strict control chars is key.
+        try:
+            return validate_prompt(prompt, min_length=1, max_length=4000)
+        except InvalidInputError as e:
+            raise ValueError(f"Invalid prompt: {e}")
         # Subprocess.run/exec handles argument separation, preventing standard shell injection.
 
 
@@ -143,7 +152,7 @@ class OllamaProvider(AIProvider):
             print(f"{ANSI_CYAN}   Completed in: {duration:.1f}s{ANSI_RESET}")
 
             if process.returncode != 0:
-                error_msg = stderr.decode().strip()
+                error_msg = safe_decode(stderr, errors="replace").strip()
                 is_quota, is_retryable = classify_error(error_msg)
                 return ProviderResponse(
                     self.name,
@@ -155,9 +164,9 @@ class OllamaProvider(AIProvider):
                 )
 
             # Check if response is empty (can happen with quota errors)
-            content = stdout.decode().strip()
+            content = safe_decode(stdout, errors="replace").strip()
             if not content:
-                error_msg = stderr.decode().strip()
+                error_msg = safe_decode(stderr, errors="replace").strip()
                 if not error_msg:
                     error_msg = "Empty response received from provider (possible quota limit or error)"
                 is_quota, is_retryable = classify_error(error_msg)
@@ -170,7 +179,9 @@ class OllamaProvider(AIProvider):
                     is_retryable=is_retryable,
                 )
 
-            return ProviderResponse(self.name, content, duration=duration)
+            # Sanitize AI response before returning
+            sanitized_content = sanitize_ai_response(content, max_length=100000)
+            return ProviderResponse(self.name, sanitized_content, duration=duration)
         except ValueError as ve:
             error_msg = str(ve)
             is_quota, is_retryable = classify_error(error_msg)
@@ -243,7 +254,7 @@ class ClaudeProvider(AIProvider):
             print(f"{ANSI_CYAN}   Completed in: {duration:.1f}s{ANSI_RESET}")
 
             if process.returncode != 0:
-                error_msg = stderr.decode().strip()
+                error_msg = safe_decode(stderr, errors="replace").strip()
                 is_quota, is_retryable = classify_error(error_msg)
                 return ProviderResponse(
                     self.name,
@@ -255,10 +266,10 @@ class ClaudeProvider(AIProvider):
                 )
 
             # Check if response is empty (can happen with quota errors)
-            content = stdout.decode().strip()
+            content = safe_decode(stdout, errors="replace").strip()
             if not content:
                 # Check stderr for error message
-                error_msg = stderr.decode().strip()
+                error_msg = safe_decode(stderr, errors="replace").strip()
                 if not error_msg:
                     error_msg = "Empty response received from provider (possible quota limit or error)"
                 is_quota, is_retryable = classify_error(error_msg)
@@ -271,7 +282,9 @@ class ClaudeProvider(AIProvider):
                     is_retryable=is_retryable,
                 )
 
-            return ProviderResponse(self.name, content, duration=duration)
+            # Sanitize AI response before returning
+            sanitized_content = sanitize_ai_response(content, max_length=100000)
+            return ProviderResponse(self.name, sanitized_content, duration=duration)
         except ValueError as ve:
             error_msg = str(ve)
             is_quota, is_retryable = classify_error(error_msg)
@@ -344,7 +357,7 @@ class GeminiProvider(AIProvider):
             print(f"{ANSI_CYAN}   Completed in: {duration:.1f}s{ANSI_RESET}")
 
             if process.returncode != 0:
-                error_msg = stderr.decode().strip()
+                error_msg = safe_decode(stderr, errors="replace").strip()
                 is_quota, is_retryable = classify_error(error_msg)
                 return ProviderResponse(
                     self.name,
@@ -355,11 +368,11 @@ class GeminiProvider(AIProvider):
                     is_retryable=is_retryable,
                 )
 
-            output = stdout.decode()
+            output = safe_decode(stdout, errors="replace")
 
             # Check if response is empty before cleanup (can happen with quota errors)
             if not output.strip():
-                error_msg = stderr.decode().strip()
+                error_msg = safe_decode(stderr, errors="replace").strip()
                 if not error_msg:
                     error_msg = "Empty response received from provider (possible quota limit or error)"
                 is_quota, is_retryable = classify_error(error_msg)
@@ -377,9 +390,10 @@ class GeminiProvider(AIProvider):
                 for line in output.splitlines()
                 if "YOLO mode" not in line and "Loaded cached" not in line
             ]
-            return ProviderResponse(
-                self.name, "\n".join(cleaned_lines).strip(), duration=duration
-            )
+            content = "\n".join(cleaned_lines).strip()
+            # Sanitize AI response before returning
+            sanitized_content = sanitize_ai_response(content, max_length=100000)
+            return ProviderResponse(self.name, sanitized_content, duration=duration)
         except ValueError as ve:
             error_msg = str(ve)
             is_quota, is_retryable = classify_error(error_msg)
@@ -738,11 +752,18 @@ async def mode_workflow(
         f"\n{ANSI_CYAN}ℹ️  Last resort fallback: ollama_fallback (qwen3-coder:30b){ANSI_RESET}"
     )
 
-    # Setup persistence
-    out_path = Path(output_dir) if output_dir else None
-    if out_path:
-        out_path.mkdir(parents=True, exist_ok=True)
-        print(f"📂 Output directory: {out_path}")
+    # Setup persistence with security validation
+    out_path = None
+    if output_dir:
+        try:
+            out_path = validate_output_path(
+                Path(output_dir), Path.cwd(), allow_creation=True
+            )
+            print(f"📂 Output directory: {out_path}")
+        except Exception as e:
+            print(f"{ANSI_YELLOW}⚠ Path validation failed: {e}{ANSI_RESET}")
+            print(f"{ANSI_YELLOW}⚠ Continuing without file output{ANSI_RESET}")
+            out_path = None
 
     try:
         # --- Step 1: Planning ---
@@ -860,6 +881,8 @@ async def mode_workflow(
         print(f"{ANSI_BOLD}{'=' * 60}{ANSI_RESET}")
 
         # Robust LGTM check
+        import re
+
         is_lgtm = bool(re.search(r"\bLGTM\b", review_res.content, re.IGNORECASE))
 
         if is_lgtm and len(review_res.content) < 200:

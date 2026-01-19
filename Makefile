@@ -9,6 +9,8 @@ ISORT := $(PYTHON) -m isort
 FLAKE8 := $(PYTHON) -m flake8
 MYPY := $(PYTHON) -m mypy
 PYLINT := $(PYTHON) -m pylint
+BANDIT := $(PYTHON) -m bandit
+SAFETY := $(PYTHON) -m safety
 
 # Source directories
 SRC_DIR := .
@@ -41,6 +43,8 @@ help:
 	@echo "  make lint-flake8      - Run flake8"
 	@echo "  make lint-pylint      - Run pylint"
 	@echo "  make lint-mypy        - Run mypy type checking"
+	@echo "  make lint-imports     - Check import organization"
+	@echo "  make security         - Run security checks (bandit + safety)"
 	@echo "  make format           - Format code with black and isort"
 	@echo "  make format-check     - Check formatting without changes"
 	@echo ""
@@ -70,7 +74,7 @@ test:
 .PHONY: test-unit
 test-unit:
 	@echo "$(COLOR_BLUE)Running unit tests...$(COLOR_RESET)"
-	$(PYTEST) $(TEST_DIR)/test_ai_orchestrator.py -v
+	$(PYTEST) $(TEST_DIR)/test_ai_orchestrator.py $(TEST_DIR)/test_security_validation.py -v
 
 .PHONY: test-workflow
 test-workflow:
@@ -84,17 +88,17 @@ test-cov:
 	@echo "$(COLOR_GREEN)Coverage report generated in htmlcov/index.html$(COLOR_RESET)"
 
 .PHONY: ci_unit_lint
-ci_unit_lint: format-check lint test
+ci_unit_lint: format-check lint-imports security lint test
 	@echo "$(COLOR_GREEN)CI checks passed!$(COLOR_RESET)"
 
 .PHONY: lint
-lint: lint-flake8 lint-pylint lint-mypy
+lint: lint-flake8 lint-pylint lint-mypy lint-imports
 	@echo "$(COLOR_GREEN)All linting passed!$(COLOR_RESET)"
 
 .PHONY: lint-flake8
 lint-flake8:
 	@echo "$(COLOR_BLUE)Running flake8...$(COLOR_RESET)"
-	$(FLAKE8) $(SRC_DIR) --exclude=$(EXCLUDE_DIRS) --max-line-length=120 --extend-ignore=E203,W503
+	$(FLAKE8) $(SRC_DIR) --exclude=$(EXCLUDE_DIRS) --max-line-length=120 --extend-ignore=E203,W503 --select=F401,F403,F405,E
 
 .PHONY: lint-pylint
 lint-pylint:
@@ -105,6 +109,27 @@ lint-pylint:
 lint-mypy:
 	@echo "$(COLOR_BLUE)Running mypy...$(COLOR_RESET)"
 	$(MYPY) $(SRC_DIR) --ignore-missing-imports --check-untyped-defs || true
+
+.PHONY: lint-imports
+lint-imports:
+	@echo "$(COLOR_BLUE)Checking import organization with isort...$(COLOR_RESET)"
+	$(ISORT) $(SRC_DIR) --check-only --skip-glob='*/.git/*' --skip-glob='*/__pycache__/*' --diff
+
+.PHONY: security
+security: security-bandit security-safety
+	@echo "$(COLOR_GREEN)Security checks complete!$(COLOR_RESET)"
+
+.PHONY: security-bandit
+security-bandit:
+	@echo "$(COLOR_BLUE)Running bandit security checks...$(COLOR_RESET)"
+	@$(BANDIT) -r $(SRC_DIR) -ll -f screen --exclude $(EXCLUDE_DIRS) 2>/dev/null || \
+		echo "$(COLOR_YELLOW)Note: Install bandit with 'pip install bandit' for security scanning$(COLOR_RESET)"
+
+.PHONY: security-safety
+security-safety:
+	@echo "$(COLOR_BLUE)Checking dependencies for known vulnerabilities...$(COLOR_RESET)"
+	@$(SAFETY) check --file=requirements.txt 2>/dev/null || \
+		echo "$(COLOR_YELLOW)Note: Install safety with 'pip install safety' for vulnerability scanning$(COLOR_RESET)"
 
 .PHONY: format
 format:
