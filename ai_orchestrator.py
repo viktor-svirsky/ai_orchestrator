@@ -83,7 +83,161 @@ def classify_error(error_message: str) -> Tuple[bool, bool]:
     return is_quota, is_retryable
 
 
-# --- Abstract Base Class for Providers ---
+# --- Code Extraction and File Creation ---
+def extract_code_blocks(content: str) -> List[Dict[str, str]]:
+    """
+    Extract code blocks from AI-generated content.
+    Supports markdown code blocks with file paths like:
+    ```path/to/file.py
+    code content
+    ```
+
+    Returns:
+        List of dicts with 'path' and 'content' keys
+    """
+    import re
+
+    code_blocks = []
+
+    # Pattern for markdown code blocks with file paths
+    # Matches: ```filepath\ncontent\n```
+    pattern = r"```([^\n]+)\n(.*?)```"
+
+    matches = re.findall(pattern, content, re.DOTALL)
+
+    for filepath, code_content in matches:
+        filepath = filepath.strip()
+
+        # Skip if it's a language identifier (python, javascript, etc.)
+        if filepath.lower() in [
+            "python",
+            "javascript",
+            "js",
+            "typescript",
+            "ts",
+            "html",
+            "css",
+            "java",
+            "c",
+            "cpp",
+            "go",
+            "rust",
+            "ruby",
+            "php",
+            "bash",
+            "sh",
+            "sql",
+            "json",
+            "yaml",
+            "xml",
+            "markdown",
+            "md",
+            "text",
+            "txt",
+        ]:
+            continue
+
+        # Skip empty paths
+        if not filepath or filepath == "```":
+            continue
+
+        code_blocks.append({"path": filepath, "content": code_content.strip()})
+
+    return code_blocks
+
+
+def create_project_files(code_content: str, target_dir: Path, prompt: str) -> bool:
+    """
+    Extract code blocks and create actual files in the target directory.
+
+    Args:
+        code_content: AI-generated code with markdown code blocks
+        target_dir: Directory where files should be created
+        prompt: Original user prompt (for context)
+
+    Returns:
+        True if files were created successfully
+    """
+    try:
+        code_blocks = extract_code_blocks(code_content)
+
+        if not code_blocks:
+            print(
+                f"{ANSI_YELLOW}⚠ No code blocks with file paths found in the generated code{ANSI_RESET}"
+            )
+            return False
+
+        # Create target directory if it doesn't exist
+        target_dir = Path(target_dir).expanduser().resolve()
+
+        # For user-specified target directories, we allow creation outside project root
+        # but still do basic security checks (no null bytes, etc.)
+        try:
+            # Basic security check - ensure no dangerous characters
+            str_path = str(target_dir)
+            if "\0" in str_path or "\x00" in str_path:
+                raise ValueError("Path contains null bytes")
+
+            validated_dir = target_dir
+            validated_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"{ANSI_RED}❌ Cannot create target directory: {e}{ANSI_RESET}")
+            return False
+
+        print(f"\n{ANSI_BOLD}📁 Creating project files in: {validated_dir}{ANSI_RESET}")
+
+        created_files = []
+        for block in code_blocks:
+            filepath = block["path"]
+            content = block["content"]
+
+            # Clean up the filepath (remove any leading/trailing slashes, resolve relative paths)
+            filepath = filepath.lstrip("/").strip()
+
+            # Create full path
+            full_path = validated_dir / filepath
+
+            # Basic security validation - ensure path stays within target directory
+            try:
+                resolved_path = full_path.resolve()
+                if not str(resolved_path).startswith(str(validated_dir)):
+                    print(
+                        f"{ANSI_YELLOW}⚠ Skipping path outside target directory: {filepath}{ANSI_RESET}"
+                    )
+                    continue
+                validated_path = resolved_path
+            except Exception as e:
+                print(
+                    f"{ANSI_YELLOW}⚠ Skipping invalid path {filepath}: {e}{ANSI_RESET}"
+                )
+                continue
+
+            # Create parent directories if needed
+            validated_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write the file
+            try:
+                validated_path.write_text(content, encoding="utf-8")
+                created_files.append(filepath)
+                print(f"{ANSI_GREEN}  ✓ Created: {filepath}{ANSI_RESET}")
+            except Exception as e:
+                print(f"{ANSI_RED}  ✗ Failed to create {filepath}: {e}{ANSI_RESET}")
+
+        if created_files:
+            print(
+                f"\n{ANSI_GREEN}✅ Successfully created {len(created_files)} file(s){ANSI_RESET}"
+            )
+            return True
+        else:
+            print(f"{ANSI_YELLOW}⚠ No files were created{ANSI_RESET}")
+            return False
+
+    except Exception as e:
+        print(f"{ANSI_RED}❌ Error creating project files: {e}{ANSI_RESET}")
+        logging.error(f"Error creating project files: {e}", exc_info=True)
+        return False
+
+
 class AIProvider(ABC):
     def __init__(
         self, name: str, timeout: int = DEFAULT_TIMEOUT, max_prompt_length: int = 100000
@@ -125,6 +279,7 @@ class OllamaProvider(AIProvider):
         return "ollama"
 
     async def ask(self, prompt: str) -> ProviderResponse:
+        start_time = time.time()
         try:
             self._validate_prompt(prompt)
             if not self.is_available():
@@ -228,6 +383,7 @@ class ClaudeProvider(AIProvider):
         return "claude"
 
     async def ask(self, prompt: str) -> ProviderResponse:
+        start_time = time.time()
         try:
             self._validate_prompt(prompt)
             if not self.is_available():
@@ -332,6 +488,7 @@ class GeminiProvider(AIProvider):
         return "gemini"
 
     async def ask(self, prompt: str) -> ProviderResponse:
+        start_time = time.time()
         try:
             self._validate_prompt(prompt)
             if not self.is_available():
@@ -815,7 +972,11 @@ async def mode_workflow(
             f"Role: Senior Developer.\n"
             f"Task: Write the code based strictly on this plan.\n"
             f"Plan:\n{plan_res.content}\n\n"
-            f"Output: The code block(s) only. Minimal explanation."
+            f"IMPORTANT: Format each code block with its file path like this:\n"
+            f"```filename.py\n"
+            f"# code here\n"
+            f"```\n\n"
+            f"Output: The code block(s) with file paths. Minimal explanation."
         )
         code_res = await ask_with_fallback(
             orchestrator, role_priorities["coder"], code_prompt, "Coder"
@@ -912,7 +1073,11 @@ async def mode_workflow(
                 f"Task: Synthesize the Final Version. Fix issues identified in the review.\n"
                 f"Original Code:\n{code_res.content}\n"
                 f"Review Feedback:\n{review_res.content}\n\n"
-                f"Output: Provide ONLY the final corrected code block."
+                f"IMPORTANT: Format each code block with its file path like this:\n"
+                f"```filename.py\n"
+                f"# code here\n"
+                f"```\n\n"
+                f"Output: Provide ONLY the final corrected code blocks with file paths."
             )
             refined_code_res = await ask_with_fallback(
                 orchestrator, role_priorities["coder"], refine_prompt, "Coder"
@@ -982,6 +1147,42 @@ async def mode_workflow(
         print(f"\n{ANSI_BOLD}--- REVIEW NOTES ---")
         print(review_res.content)
         print(f"\n{ANSI_BOLD}{'=' * 60}{ANSI_RESET}\n")
+
+        # --- Step 7: Create Project Files ---
+        # Try to detect target directory from the prompt
+        import re
+
+        # Look for patterns like "in ~/path", "at /path", "to path"
+        target_dir_match = re.search(r"\b(?:in|at|to)\s+(~?[/\w.-]+)", prompt)
+
+        if target_dir_match:
+            target_dir = target_dir_match.group(1)
+            print(f"\n{ANSI_BOLD}{'=' * 60}{ANSI_RESET}")
+            print(f"{ANSI_BOLD}[7/7] 📝 Creating Project Files...{ANSI_RESET}")
+            print(f"{ANSI_BOLD}{'=' * 60}{ANSI_RESET}")
+
+            # Create project files from the final code
+            success = create_project_files(final_code, target_dir, prompt)
+
+            if success:
+                print(
+                    f"\n{ANSI_GREEN}✅ Project files created successfully in {target_dir}{ANSI_RESET}"
+                )
+            else:
+                print(
+                    f"\n{ANSI_YELLOW}⚠ Could not create project files automatically{ANSI_RESET}"
+                )
+                print(
+                    f"{ANSI_YELLOW}💡 Tip: Make sure your code includes file paths in code blocks like:```{ANSI_RESET}"
+                )
+                print(f"{ANSI_YELLOW}   ```path/to/file.py{ANSI_RESET}")
+                print(f"{ANSI_YELLOW}   # code here{ANSI_RESET}")
+                print(f"{ANSI_YELLOW}   ```{ANSI_RESET}")
+        else:
+            print(f"\n{ANSI_CYAN}ℹ️  No target directory detected in prompt{ANSI_RESET}")
+            print(
+                f"{ANSI_CYAN}💡 Tip: Specify a path like 'Create app in ~/Projects/myapp' to auto-create files{ANSI_RESET}"
+            )
 
     except Exception as e:
         print(f"{ANSI_RED}Workflow crashed: {e}{ANSI_RESET}")
