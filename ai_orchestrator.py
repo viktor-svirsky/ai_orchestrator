@@ -85,9 +85,12 @@ def classify_error(error_message: str) -> Tuple[bool, bool]:
 
 # --- Abstract Base Class for Providers ---
 class AIProvider(ABC):
-    def __init__(self, name: str, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(
+        self, name: str, timeout: int = DEFAULT_TIMEOUT, max_prompt_length: int = 100000
+    ):
         self.name = name
         self.timeout = timeout
+        self.max_prompt_length = max_prompt_length
 
     @abstractmethod
     async def ask(self, prompt: str) -> ProviderResponse:
@@ -104,7 +107,9 @@ class AIProvider(ABC):
     def _validate_prompt(self, prompt: str):
         """Basic input validation to prevent issues."""
         try:
-            return validate_prompt(prompt, min_length=1, max_length=4000)
+            return validate_prompt(
+                prompt, min_length=1, max_length=self.max_prompt_length
+            )
         except InvalidInputError as e:
             raise ValueError(f"Invalid prompt: {e}")
         # Subprocess.run/exec handles argument separation, preventing standard shell injection.
@@ -320,7 +325,8 @@ class ClaudeProvider(AIProvider):
 
 class GeminiProvider(AIProvider):
     def __init__(self, **kwargs):
-        super().__init__("gemini", **kwargs)
+        # Gemini CLI has a 4000 character limit
+        super().__init__("gemini", max_prompt_length=4000, **kwargs)
 
     def _get_binary_name(self) -> str:
         return "gemini"
@@ -549,6 +555,16 @@ async def ask_with_fallback(
 
         # Skip unavailable providers
         if not provider or not provider.is_available():
+            continue
+
+        # Skip providers that can't handle this prompt length
+        if len(prompt) > provider.max_prompt_length:
+            logging.info(
+                f"[{role_name}] Skipping {provider_name}: prompt too long ({len(prompt)} > {provider.max_prompt_length} chars)"
+            )
+            print(
+                f"{ANSI_YELLOW}⏭️  [{role_name}] Skipping {provider_name}: prompt too long ({len(prompt)} chars, max {provider.max_prompt_length}){ANSI_RESET}"
+            )
             continue
 
         attempted_providers.append(provider_name)
